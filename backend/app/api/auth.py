@@ -1,55 +1,60 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
-from app.core.database import get_db
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, EmailStr
+from app.core.database import get_supabase
 from app.core.auth import hash_password, verify_password, create_access_token
 
 router = APIRouter()
 
 
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(email: str, password: str, db: AsyncSession = Depends(get_db)):
-    # Check if the email is already registered
-    result = await db.execute(
-        text("SELECT id FROM users WHERE email = :email"), {"email": email}
-    )
-    if result.fetchone():
+async def register(request: RegisterRequest):
+    db = get_supabase()
+    
+    # Check if email exists
+    existing = db.table("users").select("id").eq("email", request.email).execute()
+    if existing.data:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    hashed = hash_password(password)
-    result = await db.execute(
-        text(
-            "INSERT INTO users (email, password_hash) VALUES (:email, :hash)"
-            " RETURNING id, email, created_at"
-        ),
-        {"email": email, "hash": hashed},
-    )
-    await db.commit()
-    user = dict(result.fetchone()._mapping)
+    hashed = hash_password(request.password)
+    result = db.table("users").insert({
+        "email": request.email,
+        "password_hash": hashed,
+    }).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to create user")
+
+    user = result.data[0]
     token = create_access_token({"sub": str(user["id"])})
-    return {"token": token, "user": user}
+    return {"token": token, "user": {"id": user["id"], "email": user["email"]}}
 
 
 @router.post("/login")
-async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        text("SELECT id, email, password_hash FROM users WHERE email = :email"),
-        {"email": form_data.username},
-    )
-    user = result.fetchone()
-    if not user or not verify_password(form_data.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
-        )
+async def login(request: LoginRequest):
+    db = get_supabase()
+    
+    result = db.table("users").select("*").eq("email", request.email).execute()
+    
+    if not result.data:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    user_dict = dict(user._mapping)
-    token = create_access_token({"sub": str(user_dict["id"])})
+    user = result.data[0]
+    if not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_access_token({"sub": str(user["id"])})
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": str(user_dict["id"]), "email": user_dict["email"]},
+        "user": {"id": user["id"], "email": user["email"]},
     }

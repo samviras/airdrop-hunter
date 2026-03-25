@@ -1,8 +1,6 @@
 import re
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
-from app.core.database import get_db
+from fastapi import APIRouter, HTTPException
+from app.core.database import get_supabase
 from app.core.config import get_settings
 from app.schemas.models import ScanRequest
 from app.services.scanner import WalletScanner
@@ -33,7 +31,7 @@ def is_valid_address(address: str) -> bool:
 
 
 @router.post("/scan")
-async def scan_wallet(request: ScanRequest, db: AsyncSession = Depends(get_db)):
+async def scan_wallet(request: ScanRequest):
     # Validate addresses
     for addr in request.addresses:
         if not is_valid_address(addr):
@@ -46,10 +44,11 @@ async def scan_wallet(request: ScanRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="At least one chain must be specified")
 
     scanner = get_scanner_singleton()
+    db = get_supabase()
 
     # Fetch all airdrops from DB
-    result = await db.execute(text("SELECT * FROM airdrops ORDER BY status, name"))
-    airdrops = [dict(row._mapping) for row in result.fetchall()]
+    result = db.table("airdrops").select("*").order("status").order("name").execute()
+    airdrops = result.data or []
 
     all_results = []
 
@@ -91,7 +90,6 @@ async def scan_wallet(request: ScanRequest, db: AsyncSession = Depends(get_db)):
                         }
                     )
                 elif eligibility["status"] == "eligible" and existing["status"] != "eligible":
-                    # Prefer eligible over any other status
                     existing.update(
                         {
                             "status": eligibility["status"],
@@ -102,7 +100,7 @@ async def scan_wallet(request: ScanRequest, db: AsyncSession = Depends(get_db)):
 
         all_results.append(address_results)
 
-    # Build summary — only count claimable/upcoming airdrops
+    # Build summary
     total_eligible = sum(
         1
         for ar in all_results
